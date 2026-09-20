@@ -9,7 +9,7 @@ def main():
 
     response = client.system_one(
         state=ticket,
-            questions={
+        questions={
             "department": Choice(
                 instructions="Which team should handle this",
                 criteria={
@@ -32,10 +32,9 @@ def main():
         },
     )
 
-    print(response.answers["department"].choice)  # "technical"
-    print(response.answers["frustration"].score)  # 1.0
-    print(response.answers["is_urgent"].noul)     # 1.0
-    print("Hello from typesafe-ai-api!")
+    print("department:", response.choices["department"].choice)  # "technical"
+    print("frustration:", response.scores["frustration"].score)  # 1.0
+    print("is_urgent:", response.nouls["is_urgent"].noul)  # 1.0
 
 
 if __name__ == "__main__":
