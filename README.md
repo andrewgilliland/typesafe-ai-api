@@ -1,7 +1,7 @@
 # TypeSafe AI API Example
 
-A small Python example that uses the TypeSafe SDK to classify a customer
-support ticket by department, frustration, and urgency.
+A small semantic search example that uses the TypeSafe SDK to find the FAQ
+entry that best answers a natural-language question.
 
 ## Prerequisites
 
@@ -30,8 +30,17 @@ Do not commit the `.env` file or your API key to source control.
 Load the variables from `.env` and run the example:
 
 ```sh
-uv run --env-file .env main.py
+uv run --env-file .env main.py "Why won't my payment provider connect?"
 ```
 
-The script prints the selected department, frustration score, and urgency
-score returned by TypeSafe.
+The script uses a `Choice` question to rank the FAQ entries and a `Noul`
+question to determine whether any entry answers the query. It prints the best
+match, answer relevance, choice confidence, and complete ranking.
+
+Try queries such as:
+
+```sh
+uv run --env-file .env main.py "How do I recover my account?"
+uv run --env-file .env main.py "Can I get a refund when I cancel?"
+uv run --env-file .env main.py "What is the weather today?"
+```
