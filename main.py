@@ -1,72 +1,117 @@
-import argparse
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Annotated
 
-from typesafe_sdk import (
-    Choice,
-    Noul,
-    NoulCriteria,
-    TypeSafeClient,
+import httpx
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+from typesafe_sdk import TypeSafeError, TypeSafeRateLimitError
+
+from app.analyzer import TypeSafeRiskAnalyzer
+from app.config import get_settings
+from app.models import (
+    EarningsCallRiskRequest,
+    EarningsCallRiskResponse,
+    ErrorResponse,
 )
+from app.providers.alpha_vantage import AlphaVantageTranscriptProvider
+from app.providers.base import (
+    TranscriptNotFoundError,
+    TranscriptRateLimitError,
+    TranscriptUnavailableError,
+)
+from app.service import EarningsCallRiskService
 
-DOCUMENTS = {
-    "billing": "Update a credit card or investigate duplicate charges.",
-    "stripe": "Troubleshoot connecting and synchronizing a Stripe account.",
-    "password": "Reset a forgotten password or recover an account.",
-    "cancel": "Cancel a subscription and review the refund policy.",
-}
-MINIMUM_RELEVANCE = 0.7
 
+def create_app(service: EarningsCallRiskService | None = None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if service is not None:
+            app.state.risk_service = service
+            yield
+            return
 
-def search(query: str) -> None:
-    with TypeSafeClient() as client:
-        response = client.system_one(
-            state={"query": query, "documents": DOCUMENTS},
-            questions={
-                "best_match": Choice(
-                    instructions=(
-                        "Which entry in `documents` most directly answers `query`? "
-                        "Return its key."
-                    ),
-                    criteria={document_id: None for document_id in DOCUMENTS},
+        settings = get_settings()
+        with httpx.Client(
+            base_url=settings.alpha_vantage_base_url,
+            timeout=settings.request_timeout_seconds,
+        ) as http_client:
+            app.state.risk_service = EarningsCallRiskService(
+                provider=AlphaVantageTranscriptProvider(
+                    client=http_client,
+                    api_key=settings.alpha_vantage_api_key.get_secret_value(),
                 ),
-                "has_answer": Noul(
-                    instructions=(
-                        "Does any entry in `documents` meaningfully answer `query`?"
-                    ),
-                    criteria=NoulCriteria(
-                        true="At least one document directly addresses the query",
-                        false="None of the documents answer the query",
-                    ),
+                analyzer=TypeSafeRiskAnalyzer(
+                    api_key=settings.typesafe_api_key.get_secret_value(),
+                    model=settings.typesafe_model,
+                    evidence_threshold=settings.evidence_threshold,
                 ),
-            },
+            )
+            yield
+
+    application = FastAPI(
+        title="Earnings Call Risk API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    def get_service(request: Request) -> EarningsCallRiskService:
+        return request.app.state.risk_service
+
+    @application.get("/healthz")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @application.post(
+        "/v1/earnings-call-risk",
+        response_model=EarningsCallRiskResponse,
+        responses={
+            404: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
+            502: {"model": ErrorResponse},
+        },
+    )
+    def analyze_earnings_call(
+        request: EarningsCallRiskRequest,
+        risk_service: Annotated[EarningsCallRiskService, Depends(get_service)],
+    ) -> EarningsCallRiskResponse:
+        return risk_service.analyze(request.symbol, request.quarter)
+
+    @application.exception_handler(TranscriptNotFoundError)
+    async def transcript_not_found(
+        _request: Request, exc: TranscriptNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @application.exception_handler(TranscriptRateLimitError)
+    async def transcript_rate_limited(
+        _request: Request, exc: TranscriptRateLimitError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=429, content={"detail": str(exc)})
+
+    @application.exception_handler(TypeSafeRateLimitError)
+    async def typesafe_rate_limited(
+        _request: Request, _exc: TypeSafeRateLimitError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=429, content={"detail": "TypeSafe request limit reached"}
         )
 
-    match = response.choices["best_match"]
-    relevance = response.nouls["has_answer"].noul
+    @application.exception_handler(TranscriptUnavailableError)
+    async def transcript_unavailable(
+        _request: Request, exc: TranscriptUnavailableError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
 
-    print(f"Query: {query}")
-    print(f"Answer relevance: {relevance:.2f}")
+    @application.exception_handler(TypeSafeError)
+    async def typesafe_unavailable(
+        _request: Request, _exc: TypeSafeError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=502, content={"detail": "TypeSafe analysis is unavailable"}
+        )
 
-    if relevance < MINIMUM_RELEVANCE:
-        print("No sufficiently relevant result.")
-        return
-
-    print(f"Best match: {match.choice}")
-    print(f"Result: {DOCUMENTS[match.choice]}")
-    print(f"Choice confidence: {match.confidence:.2f}")
-
-    print("\nRanking:")
-    for document_id, probability in sorted(
-        match.probabilities.items(), key=lambda item: item[1], reverse=True
-    ):
-        print(f"  {document_id}: {probability:.2f}")
+    return application
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Search the example FAQ by meaning.")
-    parser.add_argument("query", help="A natural-language question")
-    args = parser.parse_args()
-    search(args.query)
-
-
-if __name__ == "__main__":
-    main()
+app = create_app()
